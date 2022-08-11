@@ -3,15 +3,13 @@
 pragma solidity ^0.8.0;
 
 enum State {
-    Active,
+    Created,
     Paused,
-    Inactive,
-    MAvailable,
-    MLocked,
-    MUnavailable
+    Removed,
+    Published
 }
 
-interface ILandNFT {
+interface IKolorLandNFT {
     /**
         @dev Updates the availibility of tokenized land to be
         purchased in a marketplace
@@ -19,7 +17,11 @@ interface ILandNFT {
      */
     function updateLandState(uint256 tokenId, State state) external;
 
-    function updateLandOwner(uint256 tokenId, address newLandOwner) external;
+    function updateLandOwner(
+        uint256 tokenId,
+        address newLandOwner,
+        string memory name
+    ) external;
 
     function addBuyer(uint256 tokenId, address newBuyer) external;
 
@@ -40,14 +42,9 @@ interface ILandNFT {
         view
         returns (uint256 initialTCO2);
 
-    function currentTCO2Of(uint256 tokenId)
-        external
-        view
-        returns (uint256 currentTCO2);
-
     function stateOf(uint256 tokenId) external view returns (State state);
 
     function safeTransferToMarketplace(address from, uint256 tokenId) external;
 
-    function getVCUS(uint256 tokenId) external view returns (uint256 vcus);
+    function getVCUSLeft(uint256 tokenId) external view returns (uint256 vcus);
 }

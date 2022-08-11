@@ -6,12 +6,14 @@ import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Burnable.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
-import "./ILandNFT.sol";
+import "./IKolorLandNFT.sol";
 
 struct GeoSpatialPoint {
-    uint256 latitude;
-    uint256 longitude;
+    int256 latitude;
+    int256 longitude;
     uint256 decimals;
+    uint256 creationDate;
+    uint256 updateDate;
 }
 
 struct Species {
@@ -21,7 +23,7 @@ struct Species {
     uint256 size;
     uint256 decimals;
     uint256 TCO2perSecond;
-    uint256 TCO2;
+    uint256 TCO2perYear;
     uint256 landId;
     uint256 creationDate;
     uint256 updateDate;
@@ -38,25 +40,26 @@ struct NFTInfo {
     string stateOrRegion;
     string city;
     State state;
-    uint256 initialTCO2;
-    uint256 currentTCO2;
+    uint256 initialTCO2perYear;
     uint256 soldTCO2;
     uint256 creationDate;
 }
 
-contract LandNFT is
+contract KolorLandNFT is
     ERC721,
     ERC721Enumerable,
     ERC721Burnable,
     Ownable,
-    ILandNFT
+    IKolorLandNFT
 {
     using Counters for Counters.Counter;
 
     Counters.Counter private _tokenIdCounter;
     address public marketplace;
 
-    constructor() ERC721("Activate LandNFT", "aNFT") {}
+    constructor() ERC721("Kolor Land NFT", "KLand") {
+        isAuthorized[msg.sender] = true;
+    }
 
     string public baseURI;
 
@@ -79,6 +82,8 @@ contract LandNFT is
     mapping(uint256 => mapping(uint256 => GeoSpatialPoint)) public points;
     mapping(uint256 => uint256) public totalPoints;
 
+    mapping(address => bool) public isAuthorized; //hot wallet, owner is cold wallet
+
     function safeMint(
         address to,
         string memory name,
@@ -91,7 +96,7 @@ contract LandNFT is
         string memory stateOrRegion,
         string memory city,
         uint256 initialTCO2
-    ) public onlyOwner {
+    ) public onlyAuthorized {
         uint256 currentTokenId = _tokenIdCounter.current();
         _tokenIdCounter.increment();
         _safeMint(to, currentTokenId);
@@ -106,10 +111,9 @@ contract LandNFT is
         mintedNFTSInfo[currentTokenId].country = country;
         mintedNFTSInfo[currentTokenId].stateOrRegion = stateOrRegion;
         mintedNFTSInfo[currentTokenId].city = city;
-        mintedNFTSInfo[currentTokenId].initialTCO2 = initialTCO2;
-        mintedNFTSInfo[currentTokenId].currentTCO2 = initialTCO2;
+        mintedNFTSInfo[currentTokenId].initialTCO2perYear = initialTCO2;
         mintedNFTSInfo[currentTokenId].creationDate = block.timestamp;
-        mintedNFTSInfo[currentTokenId].state = State.Active;
+        mintedNFTSInfo[currentTokenId].state = State.Created;
 
         uint256 _landsOwned = _totalLandOwned[landOwner];
         // set the tokenId to current landowner collection index
@@ -122,12 +126,28 @@ contract LandNFT is
         _totalLandOwned[to]++;
     }
 
-    function setMarketplace(address _marketplace) public onlyOwner {
+    function authorize(address manager) public onlyOwner {
+        isAuthorized[manager] = !isAuthorized[manager];
+    }
+
+    function setMarketplace(address _marketplace) public onlyAuthorized {
         marketplace = _marketplace;
+        isAuthorized[marketplace] = true;
     }
 
     modifier onlyMarketplace() {
-        require(marketplace == msg.sender);
+        require(
+            marketplace == msg.sender,
+            "Kolor Land NFT: You're not allowed to do that!"
+        );
+        _;
+    }
+
+    modifier onlyAuthorized() {
+        require(
+            isAuthorized[msg.sender],
+            "Kolor Land NFT: You're not allowed to do that!"
+        );
         _;
     }
 
@@ -136,20 +156,28 @@ contract LandNFT is
         _;
     }
 
+    modifier notPublishedNorRemoved(uint256 tokenId) {
+        require(
+            !isRemoved(tokenId) && !isPublished(tokenId),
+            "Kolor Land NFT:  This land can't be transfered to Marketplace"
+        );
+        _;
+    }
+
     function isLandOwner(address landOwner, uint256 tokenId)
-        internal
+        public
         view
         returns (bool)
     {
         return mintedNFTSInfo[tokenId].landOwner == landOwner;
     }
 
-    function isActive(uint256 tokenId) public view returns (bool) {
-        return mintedNFTSInfo[tokenId].state == State.Active;
+    function isRemoved(uint256 tokenId) public view returns (bool) {
+        return mintedNFTSInfo[tokenId].state == State.Removed;
     }
 
-    function isOwnerOrMarketplace(address caller) public view returns (bool) {
-        return caller == owner() || caller == marketplace;
+    function isPublished(uint256 tokenId) public view returns (bool) {
+        return mintedNFTSInfo[tokenId].state == State.Published;
     }
 
     /**
@@ -160,18 +188,24 @@ contract LandNFT is
         public
         override
         notBurned(tokenId)
+        onlyAuthorized
     {
-        require(isOwnerOrMarketplace(msg.sender));
+        require(_state != State.Created, "Kolor Land NFT: Invalid State");
         mintedNFTSInfo[tokenId].state = _state;
     }
 
-    function updateLandOwner(uint256 tokenId, address newLandOwner)
-        public
-        override
-        onlyOwner
-        notBurned(tokenId)
-    {
+    function updateLandOwner(
+        uint256 tokenId,
+        address newLandOwner,
+        string memory name
+    ) public override onlyAuthorized notBurned(tokenId) {
+        address currentOwner = landOwnerOf(tokenId);
+
         mintedNFTSInfo[tokenId].landOwner = newLandOwner;
+        mintedNFTSInfo[tokenId].landOwnerAlias = name;
+
+        _totalLandOwned[currentOwner]--;
+        _totalLandOwned[newLandOwner]++;
     }
 
     /**  
@@ -190,7 +224,7 @@ contract LandNFT is
     function updateName(uint256 tokenId, string memory newName)
         public
         override
-        onlyOwner
+        onlyAuthorized
         notBurned(tokenId)
     {
         mintedNFTSInfo[tokenId].name = newName;
@@ -222,16 +256,7 @@ contract LandNFT is
         override
         returns (uint256)
     {
-        return mintedNFTSInfo[tokenId].initialTCO2;
-    }
-
-    function currentTCO2Of(uint256 tokenId)
-        public
-        view
-        override
-        returns (uint256)
-    {
-        return mintedNFTSInfo[tokenId].currentTCO2;
+        return mintedNFTSInfo[tokenId].initialTCO2perYear;
     }
 
     function stateOf(uint256 tokenId) public view override returns (State) {
@@ -240,19 +265,18 @@ contract LandNFT is
 
     /**
         @dev transfers the token to the marketplace and marks it
-        as available for buyers to take it
+        as published for buyers to invest
 
      */
     function safeTransferToMarketplace(address from, uint256 tokenId)
         public
         override
         notBurned(tokenId)
+        onlyAuthorized
+        notPublishedNorRemoved(tokenId)
     {
-        require(isActive(tokenId), "This land NFT is not active yet!");
-        require(msg.sender == marketplace);
-
         // Transfer to the marketplace
-        updateLandState(tokenId, State.MAvailable);
+        updateLandState(tokenId, State.Published);
         safeTransferFrom(from, marketplace, tokenId);
     }
 
@@ -266,7 +290,7 @@ contract LandNFT is
         returns (uint256)
     {
         require(
-            index < balanceOf(landOwner) + 1,
+            index < totalLandOwnedOf(landOwner), // TODO: REPLACE FOR TOTALLANDOWNED OF
             "landowner index out of bounds"
         );
 
@@ -281,11 +305,20 @@ contract LandNFT is
         return totalSpecies[tokenId];
     }
 
+    function totalPointsOf(uint256 tokenId) public view returns (uint256) {
+        return totalPoints[tokenId];
+    }
+
     /** @dev set all species of a certain land */
     function setSpecies(uint256 tokenId, Species[] memory _species)
         public
-        onlyOwner
+        onlyAuthorized
+        notBurned(tokenId)
     {
+        require(
+            totalSpeciesOf(tokenId) == 0,
+            "Kolor Land NFT: Species of this land already been set"
+        );
         uint256 _totalSpecies = _species.length;
         for (uint256 i = 0; i < _totalSpecies; i++) {
             species[tokenId][i].speciesAlias = _species[i].speciesAlias;
@@ -294,7 +327,7 @@ contract LandNFT is
             species[tokenId][i].size = _species[i].size;
             species[tokenId][i].decimals = _species[i].decimals;
             species[tokenId][i].TCO2perSecond = _species[i].TCO2perSecond;
-            species[tokenId][i].TCO2 = _species[i].TCO2;
+            species[tokenId][i].TCO2perYear = _species[i].TCO2perYear;
             species[tokenId][i].landId = tokenId;
             species[tokenId][i].creationDate = block.timestamp;
         }
@@ -304,7 +337,8 @@ contract LandNFT is
 
     function addSpecies(uint256 tokenId, Species memory _species)
         public
-        onlyOwner
+        onlyAuthorized
+        notBurned(tokenId)
     {
         uint256 _totalSpecies = totalSpeciesOf(tokenId);
         species[tokenId][_totalSpecies].speciesAlias = _species.speciesAlias;
@@ -313,7 +347,7 @@ contract LandNFT is
         species[tokenId][_totalSpecies].density = _species.density;
         species[tokenId][_totalSpecies].size = _species.size;
         species[tokenId][_totalSpecies].decimals = _species.decimals;
-        species[tokenId][_totalSpecies].TCO2 = _species.TCO2;
+        species[tokenId][_totalSpecies].TCO2perYear = _species.TCO2perYear;
         species[tokenId][_totalSpecies].landId = tokenId;
         species[tokenId][_totalSpecies].creationDate = block.timestamp;
         species[tokenId][_totalSpecies].TCO2perSecond = _species.TCO2perSecond;
@@ -325,30 +359,48 @@ contract LandNFT is
         uint256 tokenId,
         uint256 speciesIndex,
         Species memory _species
-    ) public onlyOwner {
+    ) public onlyAuthorized notBurned(tokenId) {
+        require(
+            validSpecie(speciesIndex, tokenId),
+            "Kolor Land NFT: Invalid specie to update"
+        );
+
         species[tokenId][speciesIndex].speciesAlias = _species.speciesAlias;
         species[tokenId][speciesIndex].scientificName = _species.scientificName;
         species[tokenId][speciesIndex].density = _species.density;
         species[tokenId][speciesIndex].size = _species.size;
-        species[tokenId][speciesIndex].TCO2 = _species.TCO2;
+        species[tokenId][speciesIndex].TCO2perYear = _species.TCO2perYear;
         species[tokenId][speciesIndex].landId = tokenId;
         species[tokenId][speciesIndex].updateDate = block.timestamp;
         species[tokenId][speciesIndex].TCO2perSecond = _species.TCO2perSecond;
     }
 
-    function setCoordinates(uint256 tokenId, GeoSpatialPoint[] memory _points) public onlyowner{
+    function setPoints(uint256 tokenId, GeoSpatialPoint[] memory _points)
+        public
+        onlyAuthorized
+        notBurned(tokenId)
+    {
+        require(
+            totalPointsOf(tokenId) == 0,
+            "Kolor Land NFT: Geospatial points of this land already been set"
+        );
         uint256 _totalPoints = _points.length;
 
-        for(int i = 0; i<_totalPoints; i++){
+        for (uint256 i = 0; i < _totalPoints; i++) {
             points[tokenId][i].latitude = _points[i].latitude;
             points[tokenId][i].longitude = _points[i].longitude;
             points[tokenId][i].decimals = _points[i].decimals;
-        
+            points[tokenId][i].creationDate = block.timestamp;
+
             totalPoints[tokenId]++;
         }
     }
 
-    function addCordinate(uint256 tokenId, GeoSpatialPoint memory point) public onlyOwner {
+    function addPoint(uint256 tokenId, GeoSpatialPoint memory point)
+        public
+        onlyAuthorized
+        notBurned(tokenId)
+    {
         uint256 _totalPoints = totalPoints[tokenId];
 
         points[tokenId][_totalPoints].latitude = point.latitude;
@@ -358,19 +410,50 @@ contract LandNFT is
         totalPoints[tokenId]++;
     }
 
-    function updateCordinate(uint256 tokenId, uint256 pointIndex, GeoSpatialPoint memory point) public onlyOwner {
+    function updatePoint(
+        uint256 tokenId,
+        uint256 pointIndex,
+        GeoSpatialPoint memory point
+    ) public onlyAuthorized notBurned(tokenId) {
+        require(
+            validPoint(pointIndex, tokenId),
+            "Kolor Land NFT: Invalid point to update"
+        );
+
         points[tokenId][pointIndex].latitude = point.latitude;
         points[tokenId][pointIndex].longitude = point.longitude;
         points[tokenId][pointIndex].decimals = point.decimals;
-
     }
 
-    function offsetEmissions(uint256 tokenId, uint256 amount) public {
-        require(
-            isOwnerOrMarketplace(msg.sender),
-            "Forbidden: you're not allowed to do that!"
-        );
+    function validSpecie(uint256 specieIndex, uint256 tokenId)
+        internal
+        view
+        returns (bool)
+    {
+        if (specieIndex >= 0 && specieIndex < totalSpeciesOf(tokenId)) {
+            return true;
+        }
 
+        return false;
+    }
+
+    function validPoint(uint256 pointIndex, uint256 tokenId)
+        internal
+        view
+        returns (bool)
+    {
+        if (pointIndex >= 0 && pointIndex < totalPointsOf(tokenId)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function offsetEmissions(uint256 tokenId, uint256 amount)
+        public
+        onlyMarketplace
+        notBurned(tokenId)
+    {
         mintedNFTSInfo[tokenId].soldTCO2 += amount;
     }
 
@@ -405,7 +488,17 @@ contract LandNFT is
         return totalVCUSEmitted;
     }
 
-    function getVCUS(uint256 tokenId) public view override returns (uint256) {
+    /**
+        @dev returns vcus emitted from this land that are available
+        for sale
+    
+     */
+    function getVCUSLeft(uint256 tokenId)
+        public
+        view
+        override
+        returns (uint256)
+    {
         // Get the ideal vcutokens from creation date until now
         uint256 totalVCUSEmited = totalVCUSEmitedBy(tokenId);
 

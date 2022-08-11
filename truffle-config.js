@@ -1,6 +1,6 @@
 const Web3 = require("web3");
 const ContractKit = require("@celo/contractkit");
-const web3 = new Web3("https://alfajores-forno.celo-testnet.org");
+const web3 = new Web3("https://forno.celo.org");
 const kit = ContractKit.newKitFromWeb3(web3);
 const getAccount = require("./getAccount").getAccount;
 
@@ -24,6 +24,11 @@ module.exports = {
       provider: kit.connection.web3.currentProvider, // CeloProvider
       network_id: 44787, // Alfajores network id
     },
+    celo: {
+      provider: kit.connection.web3.currentProvider, // CeloProvider
+      network_id: 42220,
+    },
+    rinkeby: {},
   },
   compilers: {
     solc: {
