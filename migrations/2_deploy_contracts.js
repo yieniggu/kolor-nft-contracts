@@ -1,14 +1,15 @@
 let LandNFT = artifacts.require("LandNFT.sol");
 let LockedNFT = artifacts.require("LockedNFT.sol");
 
-module.exports = async function(deployer) {
+module.exports = async function (deployer) {
+  // Initial deploy
   await deployer.deploy(LandNFT);
-  
-  
-  await deployer.deploy(LockedNFT, LandNFT.address);
+  //await deployer.deploy(LockedNFT);
 
-  let landNFTInstance = await LandNFT.deployed();
+  // initial setup
+  //let landNFTInstance = await LandNFT.deployed();
+  //await landNFTInstance.setMarketplace(LockedNFT.address);
 
-  await landNFTInstance.setMarketplace(LockedNFT.address);
-
+  //let marketplaceInstance = await LockedNFT.deployed();
+  //await marketplaceInstance.setNFTAddress(LandNFT.address);
 };

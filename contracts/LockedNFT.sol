@@ -6,10 +6,21 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 import "./LandNFT.sol";
+import "./IKolorInterface.sol";
+
+struct OffsetEmissions {
+    uint256 vcuOffset;
+    uint256 timestamp;
+    uint256 retirementPercentage;
+    uint256 tokenId;
+    uint256 harvests;
+    uint256 rewardsLeft;
+}
 
 contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
-    // Address of the nft contract
-    address NFTAddress;
+    // Address of the nft contract and kolor
+    address public NFTAddress;
+    address public KolorAddress;
 
     // Standard timelock (5 years)
     uint256 public totalLockup = 1825 days;
@@ -20,9 +31,17 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
     // retirement pct
     uint256 public retirementPercentage = 1;
 
+    uint256 public vcuPriceInCUSD = 5 ether;
+    uint256 public vcuPriceInCELO = 1 ether;
+
     // Mapping from token Id to the timestamp when it was staked
     // in this contract
     mapping(uint256 => uint256) private lockStartTime;
+
+    // mapping from buyer to its offsets
+    mapping(address => mapping(uint256 => OffsetEmissions))
+        public offsetsByAddress;
+    mapping(address => uint256) public totalOffsetsOf;
 
     // Mapping from address to the total staked/bought
     mapping(address => uint256) private totalStakedByAddress;
@@ -50,13 +69,19 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
     // mapping from token id to harvests made
     mapping(uint256 => uint256) private harvests;
 
-    constructor(address _NFTAddress) {
-        NFTAddress = _NFTAddress;
-    }
+    constructor() {}
 
     receive() external payable {}
 
     fallback() external payable {}
+
+    function setNFTAddress(address _NFTAddress) public onlyOwner {
+        NFTAddress = _NFTAddress;
+    }
+
+    function setKolorAddress(address _KolorAddress) public onlyOwner {
+        KolorAddress = _KolorAddress;
+    }
 
     /** 
         @dev Deposit a new land nft to the marketplace
@@ -112,10 +137,16 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
     }
 
     /**
-        @dev Allows a buyer to buy a new nft and lock the contract
+        @dev Allows a buyer to compensate vcu tokens, and
+        mint kolor tokens as reward. This tokens remains locked
+        for a certain amount of time.
 
      */
-    function buyNFT(uint256 tokenId) external payable nonReentrant {
+    function offsetEmissions(uint256 tokenId, uint256 emissions)
+        external
+        payable
+        nonReentrant
+    {
         ILandNFT ilandInterface = ILandNFT(NFTAddress);
 
         require(
@@ -123,148 +154,157 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
             "This land NFT is not available!"
         );
         require(
-            msg.value >= ilandInterface.initialPriceOf(tokenId),
+            msg.value >= vcuPriceInCUSD,
             "The amount of CELO sent is not enough!"
         );
 
         require(
-            msg.sender != ilandInterface.landOwnerOf(tokenId),
-            "You can't buy your own land!"
+            ilandInterface.getVCUS(tokenId) >= emissions,
+            "This land hasn't that much TCO2 to offset"
         );
 
         // Receive the amount of CELO sent
         (bool sent, ) = address(this).call{value: msg.value}("");
         require(sent, "Failed to send CELO");
 
-        // Update land status
-        ilandInterface.updateLandState(tokenId, State.MLocked);
-
-        // Set the initial lock to current timestamp
-        lockStartTime[tokenId] = block.timestamp;
-
-        /* Update the total land bought by the buyer 
-            and add the new nft to its collection */
-        increaseBoughtCount(msg.sender, tokenId);
-
         // Update the buyer
-        ilandInterface.updateBuyer(tokenId, msg.sender);
+        ilandInterface.addBuyer(tokenId, msg.sender);
 
-        // set the staked balance
-        stakedBalance[tokenId] = msg.value;
+        // Create new information about this offset
+        addOffsetEmissions(tokenId, emissions, msg.sender);
 
-        // set the initial lockup info of this land
-        harvests[tokenId] = 0;
+        // TODO: Add minting kolor token
+        IKolorInterface iKolorInterface = IKolorInterface(KolorAddress);
+        iKolorInterface.mint(address(this), emissions);
     }
 
-    function withdrawAllCeloStaked(uint256 tokenId) external {
-        ILandNFT ilandInterface = ILandNFT(NFTAddress);
-        IERC721 erc721 = IERC721(NFTAddress);
+    /** @dev Adds a new offset structure to a buyer to represent
+        its newly offset
+    */
+    function addOffsetEmissions(
+        uint256 tokenId,
+        uint256 emissions,
+        address buyer
+    ) internal {
+        // get the current offset emissions of this address
+        totalOffsetsOf[buyer]++;
+        uint256 currentOffsetsOf = totalOffsetsOf[buyer];
 
-        require(
-            erc721.ownerOf(tokenId) == address(this),
-            "This land is not staked here!"
-        );
-        require(
-            ilandInterface.buyerOf(tokenId) == msg.sender,
-            "You havent bought this land!"
-        );
-        require(elapsedTime(tokenId) >= totalLockup, "NFT is still locked!");
-
-        // set the state to market unavailable
-        ilandInterface.updateLandState(tokenId, State.MUnavailable);
-
-        // get the celo locked
-        uint256 _stakedBalance = stakedBalance[tokenId];
-
-        // decrease the current bought lands
-        decreaseBoughtCount(msg.sender, tokenId);
-
-        // Transfer the amount of celo Locked
-        payable(msg.sender).transfer(_stakedBalance);
-
-        // reset buyer to 0 address
-        ilandInterface.updateBuyer(tokenId, address(0));
-
-        // reset the staked balance of this land
-        delete stakedBalance[tokenId];
-
-        // reset the harvests info of this land
-        delete harvests[tokenId];
+        // add offset
+        offsetsByAddress[buyer][currentOffsetsOf].vcuOffset = emissions;
+        offsetsByAddress[buyer][currentOffsetsOf].timestamp = block.timestamp;
+        offsetsByAddress[buyer][currentOffsetsOf]
+            .retirementPercentage = retirementPercentage;
+        offsetsByAddress[buyer][currentOffsetsOf].tokenId = tokenId;
+        offsetsByAddress[buyer][currentOffsetsOf].harvests = 0;
+        offsetsByAddress[buyer][currentOffsetsOf].rewardsLeft = emissions;
     }
 
-    function withdrawMonthlyCelo(uint256 tokenId) external {
-        ILandNFT ilandInterface = ILandNFT(NFTAddress);
-
+    /** @dev Allows a buyer to withdraw a certain amount of one of its
+        offsets
+     */
+    function buyerWithdraw(uint256 offsetId, uint256 amount)
+        public
+        nonReentrant
+    {
         require(
-            ilandInterface.buyerOf(tokenId) == msg.sender,
-            "You havent bought this land!"
+            totalOffsetsOf[msg.sender] > 0,
+            "Withdraw: You have nothing to withdraw"
         );
 
-        // get the harvests to make
-        uint256 _harvestsToMake = harvestsToMake(tokenId);
+        uint256 rewardsLeft = offsetsByAddress[msg.sender][offsetId]
+            .rewardsLeft;
+        require(amount <= rewardsLeft, "Withdraw: max amount exceeded");
 
-        require(
-            _harvestsToMake >= 1,
-            "You should wait until next harvest period!"
-        );
+        // get the retirements available to make since last retirement
+        uint256 amountAvailable = amountToHarvest(offsetId, msg.sender);
 
-        // Calculate the  amount to retire
-        uint256 harvestAmount = getHarvestAmount(tokenId);
+        require(amount <= amountAvailable, "Withdraw: max amount exceeded");
 
-        // Update the number of harvests made
-        harvests[tokenId]++;
+        uint256 _harvestsToMake = harvestsToMake(offsetId, msg.sender);
 
-        // Send the tokens to buyer
-        payable(msg.sender).transfer(harvestAmount);
-
-        // Update the staked balance of the land
-        stakedBalance[tokenId] -= harvestAmount;
+        // update the harvest control variables
+        offsetsByAddress[msg.sender][offsetId].harvests += _harvestsToMake;
+        offsetsByAddress[msg.sender][offsetId].rewardsLeft -= amountAvailable;
     }
 
-    function getHarvestAmount(uint256 tokenId) public view returns (uint256) {
-        ILandNFT ilandInterface = ILandNFT(NFTAddress);
+    function amountToHarvest(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        // get the monthly harvests to make this period
+        uint256 _harvestsToMake = harvestsToMake(offsetId, buyer);
 
-        uint256 currentPriceOf = ilandInterface.currentPriceOf(tokenId);
+        uint256 totalRewards = vcuOffsetOf(offsetId, buyer);
+        uint256 retirementPct = retirementPercentageOf(offsetId, buyer);
 
-        uint256 _harvestsToMake = harvestsToMake(tokenId);
+        uint256 amount = (totalRewards * _harvestsToMake * retirementPct) / 100;
 
-        // Amount to retrieve will be the 1% times the harvests available
-        // of the land's staked balance
-        uint256 harvestAmount = (currentPriceOf *
-            _harvestsToMake *
-            retirementPercentage) / 100;
-
-        return harvestAmount;
+        return amount;
     }
 
-    function currentHarvestsOf(uint256 tokenId) public view returns (uint256) {
-        return harvests[tokenId];
+    function currentHarvestsOf(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        return offsetsByAddress[buyer][offsetId].harvests;
     }
 
-    function harvestsToMake(uint256 tokenId) public view returns (uint256) {
+    function harvestsToMake(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 timestamp = timestampOf(offsetId, buyer);
         // Get elapsed months from initial start time
-        uint256 _elapsedMonths = elapsedMonths(tokenId);
+        uint256 _elapsedMonths = elapsedMonths(timestamp);
 
-        if (_elapsedMonths == 0){
+        if (_elapsedMonths < 1) {
             return 0;
         }
 
         // Get amount of harvests done
-        uint256 currentHarvests = currentHarvestsOf(tokenId);
+        uint256 currentHarvests = currentHarvestsOf(offsetId, buyer);
 
         // Calculate harvests that can be made this month
-        return 60 / (_elapsedMonths - currentHarvests);
+        return _elapsedMonths - currentHarvests;
     }
 
-    function getNextHarvestPeriod(uint256 tokenId)
+    function vcuOffsetOf(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        return offsetsByAddress[buyer][offsetId].vcuOffset;
+    }
+
+    function retirementPercentageOf(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        return offsetsByAddress[buyer][offsetId].vcuOffset;
+    }
+
+    function timestampOf(uint256 offsetId, address buyer)
+        public
+        view
+        returns (uint256)
+    {
+        return offsetsByAddress[buyer][offsetId].timestamp;
+    }
+
+    function getNextHarvestPeriod(uint256 offsetId, address buyer)
         public
         view
         returns (uint256)
     {
         // get the harvests to make
-        uint256 _harvestsToMake = harvestsToMake(tokenId);
+        uint256 _harvestsToMake = harvestsToMake(offsetId, buyer);
 
-        return lockStartTime[tokenId] + (monthlyLockup * _harvestsToMake);
+        return timestampOf(offsetId, buyer) + (monthlyLockup * _harvestsToMake);
     }
 
     /**
@@ -312,18 +352,12 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
         @dev Gets the elapsed time since the nft got staked and
             the current block timestamp
      */
-    function elapsedTime(uint256 tokenId) public view returns (uint256) {
-        uint256 _elapsedTime = block.timestamp - lockStartTime[tokenId];
-
-        return _elapsedTime;
+    function elapsedTime(uint256 timestamp) public view returns (uint256) {
+        return timestamp - block.timestamp;
     }
 
-    function elapsedMonths(uint256 tokenId) public view returns (uint256) {
-        return elapsedTime(tokenId) / monthlyLockup;
-    }
-
-    function lockStart(uint256 tokenId) public view returns (uint256) {
-        return lockStartTime[tokenId];
+    function elapsedMonths(uint256 timestamp) public view returns (uint256) {
+        return elapsedTime(timestamp) / monthlyLockup;
     }
 
     function increaseStakedCount(address landOwner, uint256 tokenId) private {
@@ -369,49 +403,6 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
         removeLandFromAllStakedEnumeration(tokenId);
     }
 
-    function increaseBoughtCount(address buyer, uint256 tokenId) private {
-        // Sum a new nft to the total Bought by this address
-        totalBoughtByAddress[buyer] = totalBoughtByAddress[buyer] + 1;
-
-        // Get the total Bought by address
-        uint256 _totalBoughtByThisAddress = totalBoughtByAddress[buyer];
-
-        // Update the reference of the nfts Bought by this address
-        boughtLands[buyer][_totalBoughtByThisAddress] = tokenId;
-
-        // Assign the index of a token Id to the owners index
-        boughtLandsIndex[tokenId] = _totalBoughtByThisAddress;
-
-        // Update the all bought info
-        allBoughtIndex[tokenId] = _allBoughtTokens.length;
-        _allBoughtTokens.push(tokenId);
-    }
-
-    function decreaseBoughtCount(address buyer, uint256 tokenId) private {
-        // Get the total Bought by address and the token index
-        uint256 lastLandIndex = totalBoughtByAddress[buyer] - 1;
-        uint256 landIndex = boughtLandsIndex[tokenId];
-
-        // When the Land to delete is the last Land
-        // the swap operation is unnecesary
-        if (landIndex != lastLandIndex) {
-            uint256 lastLandId = boughtLands[buyer][lastLandIndex];
-
-            boughtLands[buyer][landIndex] = lastLandId; // Move the last Land to the slot of the to-delete Land
-            boughtLandsIndex[lastLandId] = landIndex; // Update the moved Land's index
-        }
-
-        // This also deletes the contents at the last position of the array
-        delete boughtLandsIndex[tokenId];
-        delete boughtLands[buyer][lastLandIndex];
-
-        // Decrease a nft of the total Bought by this address
-        totalBoughtByAddress[buyer]--;
-
-        // Remove from the all tokens info
-        removeLandFromAllBoughtEnumeration(tokenId);
-    }
-
     function removeLandFromAllStakedEnumeration(uint256 tokenId) private {
         // To prevent a gap in the tokens array, we store the last token in the index of the token to delete, and
         // then delete the last slot (swap and pop).
@@ -429,52 +420,6 @@ contract LockedNFT is Ownable, ReentrancyGuard, IERC721Receiver {
         // This also deletes the contents at the last position of the array
         delete allStakedIndex[tokenId];
         _allStakedTokens.pop();
-    }
-
-    function removeLandFromAllBoughtEnumeration(uint256 tokenId) private {
-        // To prevent a gap in the tokens array, we store the last token in the index of the token to delete, and
-        // then delete the last slot (swap and pop).
-        uint256 lastTokenIndex = _allBoughtTokens.length - 1;
-        uint256 tokenIndex = allBoughtIndex[tokenId];
-
-        // When the token to delete is the last token, the swap operation is unnecessary. However, since this occurs so
-        // rarely (when the last minted token is burnt) that we still do the swap here to avoid the gas cost of adding
-        // an 'if' statement (like in _removeTokenFromOwnerEnumeration)
-        uint256 lastTokenId = allBoughtIndex[lastTokenIndex];
-
-        _allBoughtTokens[tokenIndex] = lastTokenId; // Move the last token to the slot of the to-delete token
-        allBoughtIndex[lastTokenId] = tokenIndex; // Update the moved token's index
-
-        // This also deletes the contents at the last position of the array
-        delete allBoughtIndex[tokenId];
-        _allBoughtTokens.pop();
-    }
-
-    /**
-        @dev Returns a buyed land of an address given an index
-     */
-    function landOfBuyerByIndex(address buyer, uint256 index)
-        public
-        view
-        returns (uint256)
-    {
-        require(
-            index < totalBoughtByAddress[buyer],
-            "Buyer index out of bounds"
-        );
-
-        return boughtLands[buyer][index];
-    }
-
-    /**
-        @dev returns the index position of a NFT in a buyers collection
-     */
-
-    function indexOfBoughtLand(uint256 tokenId) public view returns (uint256) {
-        require(_allStakedTokens.length > 0, "There is nothing staked");
-        require(_allBoughtTokens.length > 0, "There is no land bought yet");
-
-        return boughtLandsIndex[tokenId];
     }
 
     function allStakedTokens() public view returns (uint256[] memory) {
